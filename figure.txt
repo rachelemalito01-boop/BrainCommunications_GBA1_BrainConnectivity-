@@ -1,0 +1,127 @@
+# Figure-generation scripts
+# One example per figure type; execute R and Python blocks separately.
+
+##### 1. Anatomical network map (R) #####
+
+library(ggseg)
+library(ggsegAal)
+library(ggplot2)
+library(dplyr)
+
+# Input: CSV with one column named label containing the selected AAL atlas labels
+regions <- read.csv("network_regions.csv", stringsAsFactors = FALSE)
+network_color <- "#78a0b0"
+data(aal)
+
+highlight_layer <- aal$data %>%
+  semi_join(regions, by = "label")
+
+network_map <- ggplot() +
+  geom_sf(data = aal$data, fill = "gray90", color = "white", size = 0.2) +
+  geom_sf(data = highlight_layer, fill = network_color, color = NA) +
+  theme_void()
+
+print(network_map)
+
+
+##### 2. Circular connectivity alteration plot (R) #####
+
+library(readxl)
+library(igraph)
+library(ggraph)
+library(ggplot2)
+
+# Input: symmetric alteration matrix with ROI labels in the first row and column
+# Values: -1 = hypo-connectivity; +1 = hyper-connectivity; 0 = no alteration
+input <- read_excel("connectivity_alterations.xlsx")
+node_names <- as.character(input[[1]])
+adj <- as.matrix(input[, -1])
+storage.mode(adj) <- "numeric"
+stopifnot(nrow(adj) == ncol(adj), identical(node_names, colnames(adj)))
+stopifnot(all(is.finite(adj)), isSymmetric(unname(adj)))
+stopifnot(all(adj %in% c(-1, 0, 1)))
+diag(adj) <- 0
+network_color <- "#78a0b0"
+
+graph <- graph.adjacency(adj, weighted = TRUE, mode = "undirected")
+V(graph)$name <- node_names
+
+network_plot <- ggraph(graph, layout = "linear", circular = TRUE) +
+  geom_edge_arc(aes(color = weight), width = 1.5) +
+  geom_node_point(shape = 21, size = 7, fill = network_color) +
+  geom_node_text(
+    aes(label = name, x = x * 1.65, y = y * 1.65, angle = node_angle(x, y)),
+    hjust = 0.5, size = 15
+  ) +
+  scale_edge_color_gradientn(
+    colors = c("#1d9fff", "black", "#ff9900"),
+    values = scales::rescale(c(-1, 0, 1)),
+    limits = c(-1, 1)
+  ) +
+  coord_fixed(
+    ratio = 1, xlim = c(-2.1, 2.1), ylim = c(-2.1, 2.1),
+    expand = FALSE, clip = "off"
+  ) +
+  theme_graph() +
+  theme(
+    legend.position = "none",
+    plot.margin = margin(40, 40, 40, 40, unit = "pt"),
+    plot.background = element_rect(fill = "white", colour = NA)
+  )
+
+print(network_plot)
+
+
+##### 3. MCC-SCC connection-strength similarity plot (Python) #####
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import spearmanr, t
+
+# One group at a time; unthresholded Pearson r matrices
+# Excel files: identical ROI labels and ordering in the first row and column
+MC_df = pd.read_excel("MCC_unthresholded.xlsx", header=0, index_col=0)
+SC_df = pd.read_excel("SCC_unthresholded.xlsx", header=0, index_col=0)
+if MC_df.shape != SC_df.shape or MC_df.shape[0] != MC_df.shape[1]:
+    raise ValueError("Matrices must be square and have identical dimensions.")
+if not (MC_df.index.equals(SC_df.index) and
+        MC_df.columns.equals(SC_df.columns) and
+        MC_df.index.astype(str).tolist() == MC_df.columns.astype(str).tolist()):
+    raise ValueError("ROI labels and ordering must match.")
+
+MC = MC_df.to_numpy(dtype=float)
+SC = SC_df.to_numpy(dtype=float)
+iu = np.triu_indices(MC.shape[0], k=1)
+x, y = MC[iu], SC[iu]
+valid = np.isfinite(x) & np.isfinite(y)
+x, y = x[valid], y[valid]  # Retain genuine zero correlations
+rho, p_value = spearmanr(x, y)
+
+fig, ax = plt.subplots(figsize=(9, 7))
+ax.scatter(x, y, s=60, alpha=0.6, color="#65bf00", edgecolors="none")
+
+# Original graphical overlay: linear fit and 95% confidence band
+# Spearman correlation remains the reported association measure
+if len(x) >= 3 and np.ptp(x) > 0:
+    slope, intercept = np.polyfit(x, y, 1)
+    xx = np.linspace(x.min(), x.max(), 200)
+    yy = slope * xx + intercept
+    residuals = y - (slope * x + intercept)
+    dof = len(x) - 2
+    s_err = np.sqrt(np.sum(residuals ** 2) / dof)
+    sxx = np.sum((x - x.mean()) ** 2)
+    se_line = s_err * np.sqrt(1 / len(x) + (xx - x.mean()) ** 2 / sxx)
+    delta = t.ppf(0.975, dof) * se_line
+    ax.fill_between(xx, yy - delta, yy + delta, color="#808080", alpha=0.42)
+    ax.plot(xx, yy, linestyle="--", color="black", linewidth=4)
+
+p_label = "p < 0.001" if p_value < 0.001 else f"p = {p_value:.3f}"
+ax.text(0.02, 0.98, f"Spearman rho = {rho:.2f}\n{p_label}",
+        transform=ax.transAxes, ha="left", va="top", fontsize=25)
+ax.set_xlabel("MCC (r)", fontsize=35)
+ax.set_ylabel("SCC (r)", fontsize=35)
+ax.tick_params(labelsize=15)
+ax.grid(True, alpha=0.4)
+fig.tight_layout()
+plt.show()

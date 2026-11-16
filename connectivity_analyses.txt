@@ -1,0 +1,144 @@
+% MATLAB - Correlation matrices and Fisher r-to-z transformation
+
+% PZ and HC contain the regional values for the two groups.
+% Rows: participants; columns: regions.
+
+% Load data
+PZ = xlsread('data.xlsx', 'Sheet1');
+HC = xlsread('data.xlsx', 'Sheet2');
+
+% Correlation matrix for patients
+[R_PZ, P_PZ] = corrcoef(PZ);
+
+% Correlation matrix for controls
+[R_HC, P_HC] = corrcoef(HC);
+
+% --- Bonferroni Correction ---
+alpha = 0.05; % Livello di significatività
+m_PZ = (size(P_PZ,1) * (size(P_PZ,1) - 1)) / 2; % Numero di test per i pazienti (escludiamo diagonale)
+m_HC = (size(P_HC,1) * (size(P_HC,1) - 1)) / 2; % Numero di test per i controlli
+
+% Bonferroni-corrected threshold
+alpha_bonferroni_PZ = alpha / m_PZ;
+alpha_bonferroni_HC = alpha / m_HC;
+
+% Tresholded matrices based on adjustd p-values
+P_PZ_corrected = P_PZ < alpha_bonferroni_PZ;
+P_HC_corrected = P_HC < alpha_bonferroni_HC;
+
+% Tresholded orrelation matrices
+R_PZ_thresholded = R_PZ .* P_PZ_corrected;
+R_HC_thresholded = R_HC .* P_HC_corrected;
+
+% Fisher z-transformation of correlation matrices on non-thresholded rho
+% matrices
+z_PZ = 0.5 * log((1 + R_PZ) ./ (1 - R_PZ));
+z_HC = 0.5 * log((1 + R_HC) ./ (1 - R_HC));
+
+% Fisher z-transformation of correlation matrices on bonf rho
+% matrices
+z_PZ_bonf = 0.5 * log((1 + R_PZ_thresholded) ./ (1 - R_PZ_thresholded));
+z_HC_bonf = 0.5 * log((1 + R_HC_thresholded) ./ (1 - R_HC_thresholded));
+
+
+##### PYTHON — Connectivity alterations and between-group comparisons #####
+
+import numpy as np
+import pandas as pd
+
+# Input files for ONE clinical group and its independently matched controls
+# Bonferroni-thresholded Fisher-z matrices; region labels in the first row and column
+HC_PATH = "HC_z.xlsx"
+PZ_PATH = "PZ_z.xlsx"
+HC_SHEET = "Sheet1"
+PZ_SHEET = "Sheet1"
+
+def load_matrix(filename, sheet):
+    matrix = pd.read_excel(filename, sheet_name=sheet, index_col=0)
+    matrix.index = matrix.index.astype(str)
+    matrix.columns = matrix.columns.astype(str)
+    if not matrix.index.is_unique or not matrix.columns.is_unique:
+        raise ValueError("Region labels must be unique.")
+    if set(matrix.index) != set(matrix.columns):
+        raise ValueError("Row and column region labels must match.")
+    matrix = matrix.loc[matrix.columns, matrix.columns].astype(float)
+    values = matrix.to_numpy()
+    if len(matrix) < 2 or np.isnan(values).any():
+        raise ValueError("At least two regions and no missing values are required.")
+    if not np.allclose(values, values.T):
+        raise ValueError("The adjacency matrix must be symmetric.")
+    return matrix
+
+
+# Load the control and patient matrices
+M_HC = load_matrix(HC_PATH, HC_SHEET)
+M_PZ = load_matrix(PZ_PATH, PZ_SHEET)
+
+
+def connectivity_alterations(clinical, controls):
+    if set(clinical.columns) != set(controls.columns):
+        raise ValueError("Clinical and control matrices must contain the same regions.")
+    clinical = clinical.loc[controls.index, controls.columns]
+    n_nodes = len(controls)
+    n_possible = n_nodes * (n_nodes - 1) // 2
+    upper = np.triu(np.ones((n_nodes, n_nodes), dtype=bool), k=1)
+
+    # Both positive and negative nonzero coefficients indicate present edges
+    clinical_edges = clinical.to_numpy() != 0
+    control_edges = controls.to_numpy() != 0
+    hypo = upper & control_edges & ~clinical_edges
+    hyper = upper & ~control_edges & clinical_edges
+    n_hypo = int(hypo.sum())
+    n_hyper = int(hyper.sum())
+    n_altered = n_hypo + n_hyper
+
+    return {
+        "n_nodes": n_nodes,
+        "n_possible": n_possible,
+        "n_hypo": n_hypo,
+        "n_hyper": n_hyper,
+        "n_altered": n_altered,
+        "proportion_hypo": n_hypo / n_possible,
+        "proportion_hyper": n_hyper / n_possible,
+        "proportion_altered": n_altered / n_possible,
+        "percentage_hypo": 100 * n_hypo / n_possible,
+        "percentage_hyper": 100 * n_hyper / n_possible,
+        "percentage_altered": 100 * n_altered / n_possible,
+    }
+
+
+# Compare this clinical group with its matched controls
+result = connectivity_alterations(M_PZ, M_HC)
+print(pd.Series(result))
+
+# Repeat this block separately for each clinical group and network/modality.
+
+
+##### PYTHON — Two-proportion z-test (separate analysis) #####
+
+from math import sqrt
+from scipy.stats import norm
+import numpy as np
+
+def two_proportion_z_test(result_1, result_2):
+    # Numerators: altered edges; denominators: theoretically possible edges
+    x1, n1 = result_1["n_altered"], result_1["n_possible"]
+    x2, n2 = result_2["n_altered"], result_2["n_possible"]
+    p1, p2 = x1 / n1, x2 / n2
+    p_pool = (x1 + x2) / (n1 + n2)
+    se = sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2))
+    if se == 0:
+        return {"z": np.nan, "p_value": np.nan}
+    z = (p1 - p2) / se
+    return {"z": z, "p_value": 2 * norm.sf(abs(z))}
+
+
+# Enter the counts obtained from two separate group analyses above.
+# x1 and x2: altered connections; n1 and n2: all possible connections, N*(N-1)/2.
+x1, n1 = None, None
+x2, n2 = None, None
+
+if all(value is not None for value in (x1, n1, x2, n2)):
+    result_1 = {"n_altered": x1, "n_possible": n1}
+    result_2 = {"n_altered": x2, "n_possible": n2}
+    print(two_proportion_z_test(result_1, result_2))

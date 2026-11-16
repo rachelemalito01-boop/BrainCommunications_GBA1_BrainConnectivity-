@@ -1,0 +1,133 @@
+##### Connection-strength similarity and sparsity-controlled overlap #####
+
+import numpy as np
+import pandas as pd
+from scipy.stats import spearmanr
+
+# One study group at a time; unthresholded Pearson r matrices
+# Excel files: ROI labels in the first row and first column
+mc_file = "MCC_unthresholded.xlsx"
+sc_file = "SCC_unthresholded.xlsx"
+MC_df = pd.read_excel(mc_file, header=0, index_col=0)
+SC_df = pd.read_excel(sc_file, header=0, index_col=0)
+
+# Check identical ROI ordering and matrix dimensions
+if MC_df.shape != SC_df.shape or MC_df.shape[0] != MC_df.shape[1]:
+    raise ValueError("Matrices must be square and have identical dimensions.")
+if not (MC_df.index.equals(SC_df.index) and
+        MC_df.columns.equals(SC_df.columns) and
+        MC_df.index.astype(str).tolist() == MC_df.columns.astype(str).tolist()):
+    raise ValueError("ROI labels and ordering must match.")
+
+MC = MC_df.to_numpy(dtype=float)
+SC = SC_df.to_numpy(dtype=float)
+N = MC.shape[0]
+iu = np.triu_indices(N, k=1)
+
+# Keep all unthresholded coefficients, including genuine zeros
+# Complete off-diagonal data are required for equal-density thresholding
+if not (np.isfinite(MC[iu]).all() and np.isfinite(SC[iu]).all()):
+    raise ValueError("Unthresholded off-diagonal coefficients must be finite and non-missing.")
+
+# Spearman correlation across corresponding upper-triangle coefficients
+mc_vec = MC[iu]
+sc_vec = SC[iu]
+valid = np.isfinite(mc_vec) & np.isfinite(sc_vec)
+if valid.sum() > 1:
+    rho, p_value = spearmanr(mc_vec[valid], sc_vec[valid], nan_policy="omit")
+else:
+    rho, p_value = np.nan, np.nan
+print("Connections included:", int(valid.sum()))
+print("Spearman rho:", rho)
+print("Spearman p-value:", p_value)
+
+
+def threshold_by_sparsity(W, sparsity):
+    # Original notebook: retain the largest absolute coefficients
+    assert 0 <= sparsity < 1
+    upper = np.triu_indices(W.shape[0], k=1)
+    weights = W[upper].copy()
+    valid = ~np.isnan(weights)
+    w_valid = weights[valid]
+    n_valid = w_valid.size
+    n_keep = max(0, min(n_valid, int(round(n_valid * (1 - sparsity)))))
+    binary_valid = np.zeros_like(w_valid, dtype=int)
+    if n_keep > 0:
+        order = np.argsort(np.abs(w_valid))[::-1]
+        binary_valid[order[:n_keep]] = 1
+    binary_full = np.zeros_like(weights, dtype=int)
+    binary_full[valid] = binary_valid
+    B = np.zeros_like(W, dtype=int)
+    B[upper] = binary_full
+    return B + B.T
+
+
+# Original sequence: upper limit 80%, increments of one percentage point
+sparsity_values = np.arange(0.658, 0.80 + 1e-9, 0.01)
+results = []
+for sparsity in sparsity_values:
+    B_MC = threshold_by_sparsity(MC, sparsity)
+    B_SC = threshold_by_sparsity(SC, sparsity)
+    x = B_MC[iu].astype(bool)
+    y = B_SC[iu].astype(bool)
+    n_mc = int(x.sum())
+    n_sc = int(y.sum())
+    n_shared = int((x & y).sum())
+    cr = n_shared / ((n_mc + n_sc) / 2) if n_mc + n_sc else np.nan
+    expected_cr = x.mean()
+    results.append({
+        "sparsity_percent": 100 * sparsity,
+        "n_MCC": n_mc,
+        "n_SCC": n_sc,
+        "n_shared": n_shared,
+        "CR": cr,
+        "CR_expected_by_chance": expected_cr,
+    })
+
+# The paper's equal-density interpretation requires equal retained edge counts
+if any(row["n_MCC"] != row["n_SCC"] for row in results):
+    raise ValueError(
+        "Unequal retained edge counts: check the input matrices."
+    )
+print(pd.DataFrame(results).to_string(index=False))
+
+
+##### Overlap of previously thresholded MCC and SCC matrices #####
+
+import numpy as np
+import pandas as pd
+
+# One study group at a time; matrices already thresholded outside this script
+# For the Bonferroni analysis in the paper, use the MATLAB Bonferroni outputs
+# This block does not apply or verify the original statistical correction
+mc_file = "MCC_thresholded.xlsx"
+sc_file = "SCC_thresholded.xlsx"
+MC_df = pd.read_excel(mc_file, header=0, index_col=0)
+SC_df = pd.read_excel(sc_file, header=0, index_col=0)
+
+if MC_df.shape != SC_df.shape or MC_df.shape[0] != MC_df.shape[1]:
+    raise ValueError("Matrices must be square and have identical dimensions.")
+if not (MC_df.index.equals(SC_df.index) and
+        MC_df.columns.equals(SC_df.columns) and
+        MC_df.index.astype(str).tolist() == MC_df.columns.astype(str).tolist()):
+    raise ValueError("ROI labels and ordering must match.")
+
+MC = MC_df.to_numpy(dtype=float)
+SC = SC_df.to_numpy(dtype=float)
+region_names = MC_df.index.astype(str).tolist()
+
+# Original notebook definition: present in both modalities, irrespective of sign
+mc_present = np.isfinite(MC) & (MC != 0)
+sc_present = np.isfinite(SC) & (SC != 0)
+overlap = (mc_present & sc_present).astype(int)
+np.fill_diagonal(overlap, 0)
+
+# Count and list each undirected connection once
+connections = []
+for i in range(len(region_names)):
+    for j in range(i + 1, len(region_names)):
+        if overlap[i, j] == 1:
+            connections.append((region_names[i], region_names[j]))
+
+print("Shared connections:", len(connections))
+print(pd.DataFrame(connections, columns=["ROI_1", "ROI_2"]).to_string(index=False))

@@ -1,0 +1,127 @@
+##### Stratified random subsampling - Untreated cohort #####
+
+# Load packages
+library(readxl)
+library(dplyr)
+
+# Import eligible comparison-group participants
+data <- read_excel("data_eligible.xlsx")
+target_n <- 38L
+
+# Define strata using sex, age at onset and disease duration
+data <- data %>%
+  mutate(
+    onset_group = cut(Age_onset, breaks = c(0, 20, 40, 60, 80, Inf)),
+    duration_group = cut(DIS_DUR_Y, breaks = c(0, 5, 10, 20, 30, Inf)),
+    strata = interaction(SEX_x, onset_group, duration_group, drop = TRUE)
+  )
+
+stopifnot(nrow(data) >= target_n, !anyNA(data$strata))
+
+# Allocate the target sample proportionally across eligible-population strata
+# Assign remaining places to the largest fractional remainders
+allocation <- data %>%
+  count(strata, name = "N") %>%
+  mutate(
+    quota = target_n * N / sum(N),
+    n_sample = as.integer(floor(quota)),
+    remainder = quota - n_sample
+  ) %>%
+  arrange(desc(remainder), strata)
+
+remaining <- target_n - sum(allocation$n_sample)
+if (remaining > 0L) {
+  allocation$n_sample[seq_len(remaining)] <-
+    allocation$n_sample[seq_len(remaining)] + 1L
+}
+
+# Randomly sample within strata without replacement
+set.seed(123)
+sampled_data <- data %>%
+  left_join(select(allocation, strata, n_sample), by = "strata") %>%
+  group_by(strata) %>%
+  group_modify(~ slice_sample(.x, n = .x$n_sample[1], replace = FALSE)) %>%
+  ungroup() %>%
+  select(-n_sample)
+
+# Check sample size and stratification variables
+stopifnot(nrow(sampled_data) == target_n)
+table(sampled_data$SEX_x)
+table(sampled_data$onset_group)
+table(sampled_data$duration_group)
+
+##### Nearest-neighbour matching - Levodopa-treated cohort #####
+
+# Load packages
+library(readxl)
+library(dplyr)
+library(MatchIt)
+
+# Import eligible participants; group is coded 1 for the target group and 0 for the comparison group
+# DD_y is disease duration in years; Sex is coded 0/1
+data <- read_excel("data_matching.xlsx")
+data <- data %>%
+  filter(!is.na(group), !is.na(Sex), !is.na(DD_y))
+stopifnot(all(data$group %in% c(0, 1)), all(data$Sex %in% c(0, 1)))
+
+# 1:1 nearest-neighbour matching without replacement, exact on sex
+# Retain the original propensity-score approach; constrain disease duration in years
+set.seed(123)
+match_treated <- matchit(
+  group ~ DD_y,
+  data = data,
+  method = "nearest",
+  distance = "glm",
+  link = "logit",
+  ratio = 1,
+  replace = FALSE,
+  exact = ~ Sex,
+  caliper = c(DD_y = 4),
+  std.caliper = FALSE
+)
+summary(match_treated)
+matched_treated <- match.data(match_treated, drop.unmatched = TRUE)
+
+# Verify sex agreement and maximum disease-duration difference within pairs
+pair_checks <- matched_treated %>%
+  group_by(subclass) %>%
+  summarise(
+    n_target = sum(group == 1),
+    n_comparison = sum(group == 0),
+    same_sex = n_distinct(Sex) == 1,
+    duration_difference = max(DD_y) - min(DD_y),
+    .groups = "drop"
+  )
+stopifnot(
+  all(pair_checks$n_target == 1),
+  all(pair_checks$n_comparison == 1),
+  all(pair_checks$same_sex),
+  all(pair_checks$duration_difference <= 4)
+)
+print(pair_checks)
+table(matched_treated$group)
+
+##### Patient-control matching - Healthy controls #####
+
+# Load packages
+library(readxl)
+library(MatchIt)
+
+# Run independently for each clinical group, including the prodromal cohort
+# Import eligible participants; group is coded 1 for patients and 0 for healthy controls
+# AGE_MRI is age at MRI; SEX is coded 0/1
+data <- read_excel("data_control_matching.xlsx")
+
+# 1:1 nearest-neighbour propensity-score matching on age and sex, without replacement
+match_controls <- matchit(
+  group ~ AGE_MRI + SEX,
+  data = data,
+  method = "nearest",
+  distance = "glm",
+  link = "logit",
+  replace = FALSE,
+  ratio = 1
+)
+summary(match_controls)
+matched_controls <- match.data(match_controls)
+table(matched_controls$group)

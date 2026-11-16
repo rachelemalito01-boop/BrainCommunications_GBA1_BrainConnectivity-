@@ -1,0 +1,99 @@
+# Load packages
+library(readxl)
+library(dplyr)
+library(tidyr)
+
+##### Continuous variables #####
+
+# Import data
+data <- read_excel("data_continuous.xlsx")
+
+# Inclusion criteria and group coding
+data <- data %>%
+  filter(COHORT_x_x != "2") %>%
+  mutate(group = factor(as.character(group1), levels = c("1", "2")))
+
+variables <- c(
+  "variable_1", "variable_2", ... "variable_n"
+)
+
+# Number of subjects by group
+data %>%
+  group_by(group) %>%
+  summarise(N = n(), .groups = "drop") %>%
+  print()
+
+# Prepare variables
+data_long <- data %>%
+  select(group, all_of(variables)) %>%
+  pivot_longer(cols = -group, names_to = "Variable", values_to = "Value")
+
+# Mean and standard deviation by group
+summary_stats <- data_long %>%
+  group_by(group, Variable) %>%
+  summarise(
+    mean = mean(Value, na.rm = TRUE),
+    sd = sd(Value, na.rm = TRUE),
+    .groups = "drop"
+  )
+print(summary_stats)
+
+# Mann-Whitney U tests and FDR correction
+mw_results <- data_long %>%
+  group_by(Variable) %>%
+  summarise(
+    p_value = wilcox.test(Value ~ group, exact = FALSE)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(p_fdr = p.adjust(p_value, method = "fdr"))
+print(mw_results)
+
+##### Categorical variables #####
+
+# Import data
+data <- read_excel("data_categorical.xlsx")
+
+# Group coding
+data$group <- factor(data$Cluster_dat, levels = c(1, 0))
+variables <- c("TSC_4623")
+
+# Frequencies, within-group percentages and chi-square tests
+for (var in variables) {
+  cat("\n###", var, "###\n")
+
+  contingency_table <- table(data$group, data[[var]])
+  print(contingency_table)
+  print(round(prop.table(contingency_table, margin = 1) * 100, 2))
+  print(chisq.test(contingency_table))
+}
+
+##### Individual slopes #####
+
+# Import longitudinal data
+df <- read_excel("data_longitudinal.xlsx", sheet = "moc")
+outcomes <- c("variable_1", "variable_2", ... "variable_n")
+
+ids <- unique(df$ID)
+result <- data.frame(ID = ids)
+
+# Estimate each subject's slope using linear regression on time
+for (outcome in outcomes) {
+  slopes <- rep(NA, length(ids))
+
+  for (i in seq_along(ids)) {
+    sub <- df[df$ID == ids[i], ]
+
+    # Retain observations with non-missing outcome and time
+    sub_outcome <- sub[!is.na(sub[[outcome]]) & !is.na(sub$time), ]
+
+    if (nrow(sub_outcome) < 2) {
+      slopes[i] <- NA
+    } else {
+      fit <- lm(as.formula(paste0(outcome, " ~ time")), data = sub_outcome)
+      slopes[i] <- unname(coef(fit)["time"])
+    }
+  }
+
+  result[[paste0("slope_bl_", outcome)]] <- slopes
+}
+print(result)
